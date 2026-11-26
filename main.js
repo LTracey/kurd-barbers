@@ -152,6 +152,8 @@
     const dock = $('.dock');
     if (dock && hero) {
       new IntersectionObserver(([e]) => dock.classList.toggle('show', !e.isIntersecting), { threshold: 0.05 }).observe(hero);
+    } else if (dock) {
+      dock.classList.add('show'); // inner pages have no hero, so the dock is there from the start
     }
   } else {
     $$('[data-reveal]').forEach((el) => el.classList.add('in'));
@@ -230,16 +232,49 @@
     });
   }
 
-  /* ---------- booking: build a chair request and send it by text or WhatsApp ---------- */
+  /* ---------- booking ----------
+     Live mode: real bookings go straight into the shop's booking diary (owner dashboard).
+     If the diary can't be reached, it falls back to the original chair request by text or WhatsApp. */
   const booking = $('#booking');
   if (booking) {
-    const state = { services: [], date: null, time: null, name: '', note: '' };
+    const API = 'https://c--dec45ca3-04ed-4355-a912-fef8ff22f1d4-prod.lovable.cloud/rest/v1/rpc/';
+    const KEY = 'sb_publishable_65AichsJLkY5ubciGsbitA_VBdoi4fx'; // public booking key, safe in the browser
+    const MANAGE = 'https://kurd-barbers.lovable.app/booking/';
+
+    const state = { service: null, date: null, time: null, name: '', phone: '', note: '', consent: false };
     const dateWrap = $('#b-dates'), timeWrap = $('#b-times');
-    const nameIn = $('#b-name'), noteIn = $('#b-note');
-    const ticket = $('#ticket'), hint = $('#t-hint');
-    const sendSms = $('#send-sms'), sendWa = $('#send-wa');
+    const nameIn = $('#b-name'), noteIn = $('#b-note'), phoneIn = $('#b-phone'), consentIn = $('#b-consent'), hpIn = $('#b-website');
+    const ticket = $('#ticket'), hint = $('#t-hint'), stamp = $('.t-stamp', ticket), brandSmall = $('.t-brand small', ticket);
+    const sendSms = $('#send-sms'), sendWa = $('#send-wa'), bookNow = $('#book-now');
+    const done = $('#t-done'), tRef = $('#t-ref'), tManage = $('#t-manage'), again = $('#book-again');
     const out = { service: $('#t-service'), day: $('#t-day'), time: $('#t-time'), name: $('#t-name') };
     let days = [];
+    let live = false;
+    let serviceIds = {};
+    const slotCache = new Map();
+    let busy = false;
+
+    async function rpc(fn, body) {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 12000);
+      try {
+        const r = await fetch(API + fn, {
+          method: 'POST',
+          headers: { apikey: KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body || {}),
+          signal: ctl.signal,
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return await r.json();
+      } finally { clearTimeout(timer); }
+    }
+
+    // minutes after midnight, UK time, for an ISO start time
+    function ukMins(iso) {
+      const p = Object.fromEntries(tf.formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
+      return (+p.hour % 24) * 60 + +p.minute;
+    }
+    const timeLabel = (t) => (t == null ? '' : fmt(typeof t === 'string' ? ukMins(t) : t));
 
     function buildDays() {
       const n = ukNow();
@@ -261,7 +296,7 @@
         const first = days.find((d) => d.slots.length);
         state.date = first ? first.key : null;
         state.time = null;
-      } else {
+      } else if (!live) {
         const d = days.find((x) => x.key === state.date);
         if (state.time != null && !d.slots.includes(state.time)) state.time = null;
       }
@@ -280,35 +315,56 @@
         b.setAttribute('aria-label', `${dayLabel(d, 'long')}${d.slots.length ? '' : ', no times left'}`);
         const wd = d.i === 0 ? 'Today' : d.i === 1 ? 'Tmrw' : d.dt.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' });
         b.innerHTML = `<span class="date-wd">${wd}</span><span class="date-d">${d.dt.getUTCDate()}</span><span class="date-m">${d.dt.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' })}</span>`;
-        b.addEventListener('click', () => { state.date = d.key; state.time = null; renderDates(); renderTimes(); render('day'); });
+        b.addEventListener('click', () => { state.date = d.key; state.time = null; renderDates(); renderTimes(); render(); });
         dateWrap.appendChild(b);
       });
     }
-    function renderTimes() {
+
+    function paintTimes(list) {
       timeWrap.innerHTML = '';
-      const d = dayOf();
-      if (!d) { timeWrap.innerHTML = '<p class="empty">No times left this week. Walk in, or give us a call.</p>'; return; }
-      d.slots.forEach((t) => {
+      list.forEach((t) => {
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'slot';
-        b.textContent = fmt(t);
+        b.textContent = timeLabel(t);
         b.setAttribute('aria-pressed', String(state.time === t));
         b.addEventListener('click', () => {
           state.time = t;
           $$('.slot', timeWrap).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
-          render('time');
+          render();
         });
         timeWrap.appendChild(b);
       });
+    }
+    const say = (text) => { timeWrap.innerHTML = `<p class="empty">${text}</p>`; };
+
+    function renderTimes() {
+      const d = dayOf();
+      if (!d) { say('No times left this week. Walk in, or give us a call.'); return; }
+      if (!live) { paintTimes(d.slots); return; }
+      if (!state.service) { say('Pick a service to see the free times.'); return; }
+      const key = `${serviceIds[state.service]}|${d.key}`;
+      if (slotCache.has(key)) {
+        const list = slotCache.get(key);
+        if (state.time != null && !list.includes(state.time)) state.time = null;
+        if (list.length) paintTimes(list); else say('No free times that day. Try another day, or just walk in.');
+        return;
+      }
+      say('Checking the diary…');
+      rpc('kb_availability', { p_service: serviceIds[state.service], p_date: d.key })
+        .then((res) => {
+          slotCache.set(key, Array.isArray(res && res.slots) ? res.slots : []);
+          if (`${serviceIds[state.service]}|${state.date}` === key) { renderTimes(); render(); }
+        })
+        .catch(() => { if (`${serviceIds[state.service]}|${state.date}` === key) say('Couldn’t load the times. Text the shop below, or just walk in.'); });
     }
 
     function message() {
       const d = dayOf();
       const lines = [
         `Hi ${SHOP.name}, I'd like to book a chair.`,
-        `Service: ${state.services.join(' + ')}`,
-        `When: ${dayLabel(d, 'long')} at ${fmt(state.time)}`,
+        `Service: ${state.service}`,
+        `When: ${dayLabel(d, 'long')} at ${timeLabel(state.time)}`,
         `Name: ${state.name}`,
       ];
       if (state.note) lines.push(`Note: ${state.note}`);
@@ -316,12 +372,22 @@
       return lines.join('\n');
     }
     const isApple = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) || /Macintosh/.test(navigator.userAgent);
+    const phoneOk = () => /^[+0-9][0-9 ()-]{6,}$/.test(state.phone);
 
-    function missing() {
-      if (!state.services.length) return { text: 'Pick a service to start', el: $('.chips', booking) };
+    // What's still needed before a text/WhatsApp request can go…
+    function missingMsg() {
+      if (!state.service) return { text: 'Pick a service to start', el: $('.chips', booking) };
       if (!dayOf()) return { text: 'No days free this week', el: dateWrap };
       if (state.time == null) return { text: 'Now pick a time', el: timeWrap };
       if (!state.name) return { text: 'Last thing: your name', el: nameIn };
+      return null;
+    }
+    // …and before a real booking can be made.
+    function missing() {
+      const m = missingMsg();
+      if (m || !live) return m;
+      if (!phoneOk()) return { text: 'Your mobile number', el: phoneIn };
+      if (!state.consent) return { text: 'Tick the privacy note', el: consentIn };
       return null;
     }
     function setVal(el, v) {
@@ -331,14 +397,17 @@
     }
     function render() {
       const d = dayOf();
-      setVal(out.service, state.services.length ? state.services.join(' + ') : '—');
+      setVal(out.service, state.service || '—');
       setVal(out.day, d ? dayLabel(d, 'long') : '—');
-      setVal(out.time, state.time != null ? fmt(state.time) : '—');
+      setVal(out.time, state.time != null ? timeLabel(state.time) : '—');
       setVal(out.name, state.name || '—');
+      if (ticket.classList.contains('is-booked')) return;
       const m = missing();
-      hint.textContent = m ? m.text : 'Ready. Send it below.';
+      hint.textContent = m ? m.text : live ? 'Ready. Book it below.' : 'Ready. Send it below.';
       ticket.classList.toggle('is-ready', !m);
-      if (m) {
+      if (bookNow) bookNow.setAttribute('aria-disabled', String(!!m));
+      const mm = missingMsg();
+      if (mm) {
         [sendSms, sendWa].forEach((a) => { a.removeAttribute('href'); a.setAttribute('aria-disabled', 'true'); });
       } else {
         const body = encodeURIComponent(message());
@@ -347,34 +416,113 @@
         [sendSms, sendWa].forEach((a) => a.setAttribute('aria-disabled', 'false'));
       }
     }
-    [sendSms, sendWa].forEach((a) => a.addEventListener('click', (e) => {
-      const m = missing();
-      if (!m) return;
-      e.preventDefault();
+    function nudge(m) {
       ticket.classList.remove('shake'); void ticket.offsetWidth; ticket.classList.add('shake');
       m.el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
       const target = m.el.closest('.step') || m.el;
       target.classList.remove('flash'); void target.offsetWidth; target.classList.add('flash');
-      if (m.el === nameIn) setTimeout(() => nameIn.focus({ preventScroll: true }), 350);
+      if (m.el.tagName === 'INPUT') setTimeout(() => m.el.focus({ preventScroll: true }), 350);
+    }
+    [sendSms, sendWa].forEach((a) => a.addEventListener('click', (e) => {
+      const m = missingMsg();
+      if (!m) return;
+      e.preventDefault();
+      nudge(m);
     }));
 
-    function toggleService(s, on) {
-      const has = state.services.includes(s);
-      const want = on == null ? !has : on;
-      if (want && !has) state.services.push(s);
-      if (!want && has) state.services = state.services.filter((x) => x !== s);
-      $$('.chip', booking).forEach((c) => { if (c.dataset.service === s) c.setAttribute('aria-pressed', String(want)); });
+    async function submit() {
+      if (busy) return;
+      const m = missing();
+      if (m) { hint.textContent = m.text; nudge(m); return; }
+      busy = true;
+      bookNow.setAttribute('aria-busy', 'true');
+      bookNow.firstChild.textContent = 'Booking… ';
+      try {
+        const res = await rpc('kb_book', { p: {
+          serviceId: serviceIds[state.service], staffId: null, date: state.date, start: state.time,
+          name: state.name, phone: state.phone, email: '', notes: state.note, consent: true, website: hpIn ? hpIn.value : '',
+        } });
+        if (res && res.ok) { showBooked(res); return; }
+        const err = (res && res.error) || 'Something went wrong. Please call us.';
+        if (/taken/i.test(err)) { slotCache.clear(); state.time = null; renderTimes(); }
+        render();
+        hint.textContent = err;
+        ticket.classList.remove('is-ready', 'shake'); void ticket.offsetWidth; ticket.classList.add('shake');
+      } catch (e) {
+        render();
+        hint.textContent = 'Couldn’t reach the diary. Text the shop below instead.';
+        ticket.classList.remove('is-ready', 'shake'); void ticket.offsetWidth; ticket.classList.add('shake');
+      } finally {
+        busy = false;
+        bookNow.removeAttribute('aria-busy');
+        bookNow.firstChild.textContent = 'Book my chair ';
+      }
+    }
+
+    function showBooked(res) {
+      ticket.classList.add('is-ready', 'is-booked');
+      stamp.textContent = 'Booked';
+      brandSmall.textContent = `Ref ${res.reference}`;
+      tRef.textContent = res.reference;
+      tManage.href = `${MANAGE}${encodeURIComponent(res.reference)}?t=${encodeURIComponent(res.token)}`;
+      $$('.t-live, .t-or, .t-msg, .t-note', booking).forEach((el) => { el.hidden = true; });
+      done.hidden = false;
+      slotCache.clear();
+      if (innerWidth < 900) ticket.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+    }
+    if (again) again.addEventListener('click', () => {
+      ticket.classList.remove('is-booked', 'is-ready');
+      stamp.textContent = 'Ready to book';
+      brandSmall.textContent = 'Chair request';
+      done.hidden = true;
+      $$('.t-live, .t-or, .t-msg, .t-note', booking).forEach((el) => { el.hidden = false; });
+      state.time = null;
+      refresh();
+      $('.chips', booking).scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+    });
+
+    // One service per booking.
+    function pickService(s) {
+      state.service = state.service === s ? null : s;
+      state.time = null;
+      $$('.chip', booking).forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.service === state.service)));
+      renderTimes();
       render();
     }
-    $$('.chip', booking).forEach((c) => c.addEventListener('click', () => toggleService(c.dataset.service)));
-    $$('[data-book]').forEach((a) => a.addEventListener('click', () => toggleService(a.dataset.book, true)));
+    $$('.chip', booking).forEach((c) => c.addEventListener('click', () => pickService(c.dataset.service)));
+    $$('[data-book]').forEach((a) => a.addEventListener('click', () => { if (state.service !== a.dataset.book) pickService(a.dataset.book); }));
     nameIn.addEventListener('input', () => { state.name = nameIn.value.trim(); render(); });
     noteIn.addEventListener('input', () => { state.note = noteIn.value.trim(); render(); });
+    if (phoneIn) phoneIn.addEventListener('input', () => { state.phone = phoneIn.value.trim(); render(); });
+    if (consentIn) consentIn.addEventListener('change', () => { state.consent = consentIn.checked; render(); });
+    if (bookNow) bookNow.addEventListener('click', submit);
 
     function refresh() { buildDays(); renderDates(); renderTimes(); render(); }
+
+    // Arriving from a menu "Book" link: that service is already picked.
+    const wanted = new URLSearchParams(location.search).get('service');
+    if (wanted && $$('.chip', booking).some((c) => c.dataset.service === wanted)) {
+      state.service = wanted;
+      $$('.chip', booking).forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.service === wanted)));
+    }
     refresh();
+
+    // Switch on live booking once the diary answers.
+    rpc('kb_config').then((cfg) => {
+      const list = (cfg && cfg.services) || [];
+      list.forEach((s) => { serviceIds[s.name] = s.id; });
+      if (!$$('.chip', booking).every((c) => serviceIds[c.dataset.service])) return; // names don't match: stay in message mode
+      live = true;
+      root.classList.add('kb-live');
+      $$('[data-live]', booking).forEach((el) => { el.hidden = false; });
+      sendSms.classList.replace('btn-sun', 'btn-ghost');
+      stamp.textContent = 'Ready to book';
+      state.time = null;
+      refresh();
+    }).catch(() => { /* diary unreachable: the original text/WhatsApp request still works */ });
+
     // keep times honest if the page is left open
-    setInterval(refresh, 5 * 60 * 1000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+    setInterval(() => { slotCache.clear(); refresh(); }, 5 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { slotCache.clear(); refresh(); } });
   }
 })();

@@ -442,3 +442,31 @@ html.menu-open .dock { transform: translateY(150%); }
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; transition-delay: 0s !important; }
   .js [data-reveal], .js [data-hero], .js .hero-title [data-hero] { opacity: 1; transform: none; }
 }
+
+/* ---------- Multi-page site + live booking (added 26 Nov 2026; the design above is unchanged) ---------- */
+[hidden] { display: none !important; }
+.page-first { padding-top: calc(76px + clamp(64px, 9vw, 120px)); }
+.nav-links a[aria-current="page"] { color: var(--cream); }
+.nav-links a[aria-current="page"]::after { transform: scaleX(1); }
+.mmenu-links a[aria-current="page"] { color: var(--sun); }
+.mmenu.open .mmenu-links li:nth-child(6) { transition-delay: .37s; }
+.foot-links { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+
+.book-form input + input { margin-top: 10px; }
+.consent { display: flex; align-items: flex-start; gap: 12px; margin-top: 16px; color: var(--muted); font-size: 14.5px; line-height: 1.45; cursor: pointer; }
+.book-form .consent input { flex: none; width: 20px; height: 20px; margin: 1px 0 0; padding: 0; border-radius: 6px; accent-color: var(--sun); box-shadow: none; }
+.consent a { color: var(--cream); }
+.hp { position: absolute !important; left: -9999px !important; width: 1px !important; height: 1px !important; opacity: 0; }
+.t-actions.t-live { grid-template-columns: 1fr; }
+.t-actions.t-live .btn[aria-busy="true"] { opacity: .7; cursor: progress; }
+.t-or { margin: 26px 0 -12px; color: var(--dim); font: 500 11px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; text-align: center; }
+.t-done { margin-top: 26px; padding: 24px 22px; border: 1px solid var(--line2); border-radius: 20px; background: rgba(244, 237, 225, .03); text-align: center; }
+.t-done p { margin: 0 0 16px; color: var(--muted); font-size: 15px; line-height: 1.5; }
+.t-done a { color: var(--cream); }
+.t-done-ref { color: var(--sun) !important; font: 500 11px/1 var(--mono) !important; letter-spacing: .16em; text-transform: uppercase; }
+.t-done-ref b { display: block; margin-top: 12px; color: var(--cream); font: 900 46px/1 var(--display); letter-spacing: .08em; }
+
+.privacy .prose { max-width: 720px; margin-top: clamp(36px, 5vw, 56px); }
+.privacy .prose h2 { margin: 34px 0 10px; font: 800 26px/1.1 var(--display); letter-spacing: .02em; text-transform: uppercase; }
+.privacy .prose p { margin: 0; color: var(--muted); font-size: 17px; line-height: 1.6; }
+.privacy .prose a { color: var(--cream); }
